@@ -1,2 +1,0 @@
-zsh:1: no such file or directory: gen.in
-./gen < gen.in > gen.out  0.00s user 0.00s system 62% cpu 0.002 total
