@@ -6,6 +6,7 @@ using namespace std;
 const int maxn = 1e5;
 int a[maxn];
 int main(){
+    freopen("g.in","w",stdout);
     int T = 10; printf("%d\n",T);
     while(T--){
         int n = maxn; printf("%d\n", n);

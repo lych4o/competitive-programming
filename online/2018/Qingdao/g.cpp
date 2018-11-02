@@ -3,6 +3,7 @@
 #include<vector>
 #include<set>
 #include<algorithm>
+#include<queue>
 #define piL pair<int, long long>
 #define fi first
 #define se second
@@ -13,6 +14,10 @@
 
 using namespace std;
 typedef long long LL;
+
+const int maxn = 1e5+10;
+int ls[maxn*20],rs[maxn*20],root[maxn],n,
+    a[maxn],tot,sum[maxn*20];
 
 //fread版本
 namespace IO {
@@ -58,12 +63,7 @@ namespace IO {
         print(x); putchar('\n');
     }
 };
-
-const int maxn = 1e5+10;
-int ls[maxn*30],rs[maxn*30],root[maxn],n,
-    a[maxn],tot,sum[maxn*30];
-
-#define mid (((l)+(r))/2)
+#define mid (((l)+(r))>>1)
 void build(int& rt, int l=1, int r=maxn){
     rt = tot++; sum[rt] = 0;
     if(l==r-1) return ;
@@ -82,12 +82,21 @@ void update(int last, int& rt, int v, int l=1, int r=maxn){
         update(ls[last], ls[rt], v, l, mid);
     }
 }
-int query(int x, int y, int rt, int l=1, int r=maxn){
-    //printf("query(%d,%d,%d,[%d,%d)):%d\n",x,y,rt,l,r,sum[rt]);
-    if(l >= y || r <= x) return 0;
-    if(l >= x && r <= y) return sum[rt];
-    int a = query(x,y,ls[rt],l,mid), b = query(x,y,rs[rt],mid,r);
+int query(int x, int y, int rtL, int rtR, int l=1, int r=maxn){
+    //printf("query([%d,%d),[%d,%d)):%d\n",x,y,l,r,sum[rtR]-sum[rtL]);fout;
+    if(l >= y || r <= x || x >= y) return 0;
+    if(l >= x && r <= y) return sum[rtR]-sum[rtL];
+    int a = query(x,y,ls[rtL],ls[rtR],l,mid),
+      b = query(x,y,rs[rtL],rs[rtR],mid,r);
     return a+b;
+}
+int qsum(int x, int y, int l, int r){
+    if(r-l >= 17){
+        int ret = 0;
+        for(int i = l; i <= r; i++) ret += (a[i]>=x && a[i]<y);
+        return ret;
+    }
+    return query(x,y,root[l-1],root[r]);
 }
 
 int bit[maxn];
@@ -105,12 +114,14 @@ inline int bsum(int x){
 inline void del(int l, int r){
     for(int i = l; i <= r; i++) add(a[i],-1);
 }
-set<piL> pos;
+set<int> pos;
 multiset<LL> st;
+LL ans[maxn];
+
 void init(){
     tot=0;
-    st.clear();
     pos.clear();
+    st.clear();
 }
 
 inline LL get(int l, int r){
@@ -124,68 +135,114 @@ inline LL get(int l, int r){
     return ret;
 }
 void DEBUG(){
-    int p, l, r;
-    while(cin >> p >> l >> r) cout << query(l,r,root[p]) << endl;
+    int p1, p2, l, r;
+    while(cin >> p1 >> p2 >> l >> r) cout << query(l,r,root[p1],root[p2]) << endl;
 }
+#define FASTIO
 int main(){
+#ifdef FASTIO
     IO::begin();
+#endif
     int T; 
+#ifdef FASTIO
     IO::scan_d(T);
-    //sc(T);
+#else
+    sc(T);
+#endif
     while(T--){
         init();
-        IO::scan_d(n); 
-        //sc(n);
-        build(root[0]);
-        LL tmp = 0;
+#ifdef FASTIO
+        IO::scan_d(n);
+#else
+        sc(n); 
+#endif
+        build(root[0]); LL tmp = 0;
+        //int now = clock();
         for(int i = 1; i <= n; i++){
+#ifdef FASTIO
             IO::scan_d(a[i]);
-            //sc(a[i]);
+#else
+            sc(a[i]);
+#endif
             update(root[i-1],root[i],a[i]);
             //printf("tot:%d\n",tot);
             add(a[i], 1);
             tmp += bsum(maxn-1)-bsum(a[i]);
             //printf("a[%d]:%d, tmp:%lld\n",i,a[i],tmp); fout;
         } del(1,n);
-        //DEBUG();
+        //printf("%lu\n",(clock()-now)/1000);
+        ans[n] = tmp;
         st.insert(tmp);
-        LL ans = 0;
-        pos.insert(mk(0,0LL)); pos.insert(mk(n,tmp));
+        //DEBUG();
+        LL res = 0;
+        pos.insert(n+1); pos.insert(0);
         for(int i = 1; i <= n; i++){
-            printf("%lld%c", ans=*st.rbegin(), " \n"[i==n]); fout;
-            //LL shit; scanf("%lld", &shit); shit ^= ans; int p = shit;
-            //LL shit; IO::scan_d(shit); shit ^= ans; int p = shit;
-            int p; 
-            IO::scan_d(p);
+#ifdef FASTIO
+            res = *st.rbegin();
+            IO::print(res); printf("%c", " \n"[i==n]); fout;
+            LL shit; IO::scan_d(shit); shit ^= res; int p = shit;
+#else
+            printf("%lld%c", res=*st.rbegin(), " \n"[i==n]);
+            LL shit; scanf("%lld", &shit); shit ^= res; int p = shit;
+#endif
+            //int p; 
             //sc(p);
-            set<piL>::iterator it = pos.lower_bound(mk(p,0LL));
-            LL all = it->se;
-            int R = it->fi, L = ((--it)->fi) + 1;
-            LL lval, rval; 
-            if(p-L>R-p){
+            //IO::scan_d(p);
+            auto it = pos.lower_bound(p);
+            int R = *it-1, L = (*(--it))+1;
+            LL all = ans[R], lval = 0, rval = 0;
+            all -= query(a[p]+1,maxn,root[L-1],root[p]);
+            all -= query(1,a[p],root[p],root[R]);
+            //printf("p;%d, L:%d, R:%d, all:%lld\n",p,L,R,all); fout;
+            int thre = 17;
+            if(max(R-p,p-L) <= thre){
+                for(int i = L; i < p; i++) for(int j = i+1; j < p; j++){
+                    lval += a[i]>a[j];
+                }
+                for(int i = p+1; i <= R; i++) for(int j = i+1; j <= R; j++){
+                    rval += a[i]>a[j];
+                }
+            }else
+#define fuck
+            if(p-L<R-p){
+#ifdef fuck
+                for(int i = L; i < p; i++){
+                    add(a[i],1);
+                    lval += bsum(maxn-1)-bsum(a[i]);
+                    rval -= query(1,a[i],root[p],root[R]);
+                }
+                rval += all-lval;
+                for(int i = L; i < p; i++) add(a[i],-1);
+#else
                 lval = get(L,p-1); rval = all - lval;
                 for(int i = L; i <= p; i++){
-                    rval -= query(1,a[i],root[R]);
-                    rval += query(1,a[i],root[p-1]);
-                    //printf("query(%d,%d,%d):%d,query(%d,%d,%d):%d\n",
-                      //  1,a[i],root[R],query(1,a[i],root[R]),
-                       // 1,a[i],root[p],query(1,a[i],root[p]));
+                    rval -= query(1,a[i],root[p-1],root[R]);
                 }
+#endif
             }else{
+#ifdef fuck
+                for(int i = p+1; i <= R; i++){
+                    add(a[i],1);
+                    rval += bsum(maxn-1)-bsum(a[i]);
+                    lval -= query(a[i]+1,maxn,root[L-1],root[p-1]);
+                }
+                lval += all-rval;
+                for(int i = p+1; i <= R; i++) add(a[i],-1);
+#else
                 rval = get(p+1,R); lval = all - rval;
                 for(int i = p; i <= R; i++){
-                    lval -= query(a[i]+1,maxn,root[p]);
-                    lval += query(a[i]+1,maxn,root[L-1]);
+                    lval -= query(a[i]+1,maxn,root[L-1],root[p]);
                 }
+#endif
             }
             //printf("p:%d, L:%d, R:%d, lval:%lld, rval:%lld\n",p,L,R,lval,rval);
-            pos.erase(++it);
-            pos.insert(mk(p,0LL));
-            if(p > L) pos.insert(mk(p-1,lval));
-            if(R > p) pos.insert(mk(R,rval));
-            st.erase(st.lower_bound(all));
-            st.insert(lval); st.insert(rval);
+            st.erase(st.lower_bound(ans[R]));
+            pos.insert(p); ans[p] = 0;
+            //printf("lval:%lld, rval:%lld\n",lval,rval);fout;
+            if(R>p) st.insert(ans[R]=rval);
+            if(p>L) st.insert(ans[p-1]=lval);
         }
     }
     return 0;
 }
+
