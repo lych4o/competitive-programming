@@ -1,38 +1,1196 @@
-ef      recall  time_us_per_query       qps
-10      0.47832 541.951 1845.19
-11      0.49723 559.942 1785.9
-12      0.51447 593.701 1684.35
-13      0.52912 603.026 1658.3
-14      0.54336 624.684 1600.81
-15      0.55723 656.513 1523.2
-16      0.56977 665.567 1502.48
-17      0.58159 698.693 1431.24
-18      0.59196 704.62  1419.2
-19      0.60233 724.39  1380.47
-20      0.612   755.408 1323.79
-21      0.62135 763.623 1309.55
-22      0.62987 794.289 1258.99
-23      0.63791 802.236 1246.52
-24      0.64564 832.085 1201.8
-25      0.65326 838.315 1192.87
-26      0.6606  868.914 1150.86
-27      0.6681  875.136 1142.68
-28      0.67416 905.641 1104.19
-29      0.67968 911.425 1097.18
-30      0.68519 941.808 1061.79
-40      0.7343  1114.42 897.324
-50      0.76848 1300.41 768.986
-60      0.79498 1472.21 679.251
-70      0.81666 1639.72 609.861
-80      0.83422 1805.52 553.857
-90      0.84884 1970.5  507.486
-100     0.86091 2134.63 468.465
-140     0.89452 2798.52 357.332
-180     0.91586 3762.41 265.787
-220     0.93082 3762.07 265.811
-260     0.9411  4330.24 230.934
-300     0.94881 4896.33 204.234
-340     0.95471 5447.02 183.587
-380     0.95963 5995.76 166.784
-420     0.96346 6539.77 152.911
-460     0.96686 7072.26 141.397
+#pragma once
+
+#include <bits/stdc++.h>
+#include <cstddef>
+
+#if defined(__AVX512F__)
+#include <immintrin.h>
+#endif
+
+#include <cstdint>
+
+#include "defines.hpp"
+#include "utils/memory.hpp"
+
+FORCE_INLINE float reduce_add_f32x8(__m256 x)
+{
+    // [0, 1, 2, 3] + [4, 5, 6, 7]
+    auto sumh = _mm_add_ps(_mm256_castps256_ps128(x), _mm256_extractf128_ps(x, 1));
+
+    // [0, 1, 2, 3] + [2, 3, 2, 3]
+    auto tmp1 = _mm_add_ps(sumh, _mm_movehl_ps(sumh, sumh));
+
+    // [0, 1, 2, 3] + [1, 3, 1, 3]
+    auto tmp2 = _mm_add_ps(tmp1, _mm_movehdup_ps(tmp1));
+    return _mm_cvtss_f32(tmp2);
+}
+
+FORCE_INLINE float L2Sqr16(
+    const float *__restrict__ x, const float *__restrict__ y, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        __m512 yy = _mm512_loadu_ps(&y[i]);
+        __m512 t = _mm512_sub_ps(xx, yy);
+        sum = _mm512_fmadd_ps(t, t, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+    return result;
+#else
+    for (size_t i = 0; i < L; ++i) {
+        float tmp = x[i] - y[i];
+        result += tmp * tmp;
+    }
+    return result;
+#endif
+}
+
+FORCE_INLINE float L2Sqr(
+    const float *__restrict__ x, const float *__restrict__ y, size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    float result = L2Sqr16(x, y, num16);
+    for (size_t i = num16; i < L; ++i) {
+        float tmp = x[i] - y[i];
+        result += tmp * tmp;
+    }
+    return result;
+}
+
+/* Compute L2sqr to origin */
+FORCE_INLINE float L2Sqr(const float *__restrict__ x, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    size_t num16 = L - (L & 0b1111);
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < num16; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        sum = _mm512_fmadd_ps(xx, xx, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+    for (size_t i = num16; i < L; ++i) {
+        float tmp = x[i];
+        result += tmp * tmp;
+    }
+    return result;
+#else
+    for (size_t i = 0; i < L; ++i) {
+        float tmp = x[i];
+        result += tmp * tmp;
+    }
+    return result;
+#endif
+}
+
+FORCE_INLINE float IP(const float *x, const float *y, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    size_t num16 = L - (L & 0b1111);
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < num16; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        __m512 yy = _mm512_loadu_ps(&y[i]);
+        sum = _mm512_fmadd_ps(xx, yy, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+    for (size_t i = num16; i < L; ++i) {
+        result += x[i] * y[i];
+    }
+    return result;
+#else
+    for (size_t i = 0; i < L; ++i) {
+        result += x[i] * y[i];
+    }
+    return result;
+#endif
+}
+
+/**
+ * @brief Inner produce between float vec and uint8 vec, length must be a mutiple of 16
+ *
+ * @param x Float vec
+ * @param y Uint8 vec
+ * @param L Length of vecs
+ * @return FORCE_INLINE
+ */
+FORCE_INLINE float IP16_fxu8(
+    const float *__restrict__ x, const uint8_t *__restrict__ y, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 xx = _mm512_load_ps(&x[i]);
+        __m512 yy =
+            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(_mm_loadu_si128((__m128i *)&y[i])));
+        sum = _mm512_fmadd_ps(xx, yy, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    for (size_t i = 0; i < L; i += 4) {
+        result += x[i] * static_cast<float>(y[i]);
+        result += x[i + 1] * static_cast<float>(y[i + 1]);
+        result += x[i + 2] * static_cast<float>(y[i + 2]);
+        result += x[i + 3] * static_cast<float>(y[i + 3]);
+    }
+#endif
+    return result;
+}
+FORCE_INLINE float IP16_fxu16(
+    const float *__restrict__ x, const uint16_t *__restrict__ y, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 xx = _mm512_load_ps(&x[i]);
+        __m512 yy =
+            _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(_mm256_load_si256((__m256i *)&y[i])));
+        sum = _mm512_fmadd_ps(xx, yy, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    for (size_t i = 0; i < L; i += 4) {
+        result += x[i] * static_cast<float>(y[i]);
+        result += x[i + 1] * static_cast<float>(y[i + 1]);
+        result += x[i + 2] * static_cast<float>(y[i + 2]);
+        result += x[i + 3] * static_cast<float>(y[i + 3]);
+    }
+#endif
+    return result;
+}
+
+FORCE_INLINE float IP_fxu8(
+    const float *__restrict__ x, const uint8_t *__restrict__ y, size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    float result = 0;
+#if defined (__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < num16; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        __m512 yy =
+            _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(_mm_loadu_si128((__m128i *)&y[i])));
+        sum = _mm512_fmadd_ps(xx, yy, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    for (size_t i = 0; i < num16; i++) {
+        result += x[i] * y[i];
+    }
+#endif
+
+    for (size_t i = num16; i < L; ++i) {
+        result += x[i] * static_cast<float>(y[i]);
+    }
+    return result;
+}
+
+FORCE_INLINE float IP32_fxu4(
+    const float *__restrict__ x, const uint8_t *__restrict__ y, size_t D)
+{
+#if defined (__AVX512F__)
+    __m128i mask = _mm_set1_epi8(0b1111);
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < D; i += 32) {
+        __m128i a8 = _mm_loadu_epi32(&y[i / 2]);
+        __m128i b8 = a8;
+        __m512 x1 = _mm512_load_ps(&x[i]);
+        __m512 x2 = _mm512_load_ps(&x[i + 16]);
+
+        // get lower(0 to 15) and upper(16 to 31) 4 bits
+        a8 = _mm_and_si128(a8, mask);
+        b8 = _mm_and_si128(_mm_srli_epi16(b8, 4), mask);
+
+        __m512 af = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a8));
+        sum = _mm512_fmadd_ps(af, x1, sum);
+        __m512 bf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b8));
+        sum = _mm512_fmadd_ps(bf, x2, sum);
+    }
+    return _mm512_reduce_add_ps(sum);
+#else
+    float result = 0;
+    for (size_t i = 0; i < D; i++) {
+        uint8_t cur_code = (y[i/2] >> (4 * (i % 2 == 0))) & 0b1111;
+        result += x[i] * cur_code;
+    }
+    return result;
+#endif
+}
+
+FORCE_INLINE float IP_fxu4(
+    const float *__restrict__ x, const uint8_t *__restrict__ y, size_t D)
+{
+    size_t num32 = D - (D & 0x1F);
+    float result = 0;
+#if defined(__AVX512F__)
+    __m128i mask = _mm_set1_epi8(0b1111);
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < num32; i += 32) {
+        __m128i a8 = _mm_loadu_epi32(&y[i / 2]);
+        __m128i b8 = a8;
+        __m512 x1 = _mm512_loadu_ps(&x[i]);
+        __m512 x2 = _mm512_loadu_ps(&x[i + 16]);
+
+        // get lower(0 to 15) and upper(16 to 31) 4 bits
+        a8 = _mm_and_si128(a8, mask);
+        b8 = _mm_and_si128(_mm_srli_epi16(b8, 4), mask);
+
+        __m512 af = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a8));
+        sum = _mm512_fmadd_ps(af, x1, sum);
+        __m512 bf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b8));
+        sum = _mm512_fmadd_ps(bf, x2, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    for (size_t i = 0; i < num32; i++) {
+        uint8_t cur_code = (y[i / 2] >> (4 * (i % 2 == 0))) & 0b1111;
+        result += static_cast<float>(cur_code) * x[i];
+    }
+#endif
+    for (size_t i = num32; i < D; ++i) {
+        uint8_t cur_code = (y[i / 2] >> (4 * (i % 2 == 0))) & 0b1111;
+        result += static_cast<float>(cur_code) * x[i];
+    }
+
+    return result;
+}
+
+// General code for fxu6, fxu2, ...
+//      code_len: 2 for fxu2, 6 for fxu6, ...
+//      result : result variable to add
+FORCE_INLINE void __fxu(const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D, size_t code_len, float &result) {
+    uint8_t mask = 0;
+    for(size_t i = 0; i < code_len; i++) {
+        mask |= 1 << i;
+    }
+
+    for (size_t i = 0; i < arr_len; i++) {
+        size_t bit_pos = i * code_len;
+        size_t byte_pos = bit_pos / 8;
+        size_t offset = bit_pos % 8;
+        uint16_t val = y[byte_pos] | (offset + code_len >= 8) ? (y[byte_pos + 1] << 8) : 0;
+        uint8_t code = (val >> offset) & mask;
+        result += query[i] * code;
+    }
+}
+
+FORCE_INLINE float IP32_fxu6(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    uint8_t *o_compact = const_cast<uint8_t *>(y);
+
+    __m128i mask6 = _mm_set1_epi8(0b00111111);
+    __m128i mask2 = _mm_set1_epi8(0b00110000);
+    __m128i mask4 = _mm_set1_epi8(0b00001111);
+
+    for (size_t i = 0; i < D; i += 32) {
+        __m128i x = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_compact));
+        __m128i y = _mm_cvtsi64_si128(*reinterpret_cast<long long *>(o_compact + 16));
+
+        __m128i vec_0_to_15 = _mm_and_si128(x, mask6);
+        __m128i vec_16_to_31 = _mm_and_si128(_mm_srli_epi16(x, 2), mask2);
+        vec_16_to_31 = _mm_or_si128(vec_16_to_31, _mm_and_si128(y, mask4));
+        vec_16_to_31 = _mm_or_si128(
+            vec_16_to_31, _mm_and_si128(_mm_srli_epi16(_mm_slli_si128(y, 8), 4), mask4));
+
+        __m512 xx = _mm512_loadu_ps(&query[i]);
+        __m512 yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_0_to_15));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 16]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_16_to_31));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        o_compact += 24;
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    __fxu(query, y, D, 6, result);
+#endif
+
+    return result;
+}
+
+FORCE_INLINE float IP64_fxu6(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    uint8_t *o_compact = const_cast<uint8_t *>(y);
+
+    __m128i mask6 = _mm_set1_epi8(0b00111111);
+    __m128i mask2 = _mm_set1_epi8(0b00110000);
+    __m128i mask4 = _mm_set1_epi8(0b00001111);
+
+    for (size_t i = 0; i < D; i += 64) {
+        __m128i cpt1 = _mm_load_si128(reinterpret_cast<__m128i *>(o_compact + 0));
+        __m128i cpt2 = _mm_load_si128(reinterpret_cast<__m128i *>(o_compact + 16));
+        __m128i cpt3 = _mm_load_si128(reinterpret_cast<__m128i *>(o_compact + 32));
+
+        __m128i vec_00_to_15 = _mm_and_si128(cpt1, mask6);
+        __m128i vec_16_to_31 = _mm_and_si128(cpt2, mask6);
+        __m128i vec_32_to_47 = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi16(cpt1, 2), mask2), _mm_and_si128(cpt3, mask4));
+        __m128i vec_48_to_63 = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi16(cpt2, 2), mask2),
+            _mm_and_si128(_mm_srli_epi16(cpt3, 4), mask4));
+
+        __m512 xx, yy;
+
+        xx = _mm512_loadu_ps(&query[i]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_00_to_15));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 16]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_16_to_31));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 32]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_32_to_47));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 48]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        o_compact += 48;
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else 
+    __fxu(query, y, D, 6, result);
+#endif
+
+    return result;
+}
+
+FORCE_INLINE float IP64_fxu2(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    uint8_t *o_compact = const_cast<uint8_t *>(y);
+
+    __m128i mask = _mm_set1_epi8(0b00000011);
+
+    for (size_t i = 0; i < D; i += 64) {
+        __m128i cpt = _mm_load_si128(reinterpret_cast<__m128i *>(o_compact));
+
+        __m128i vec_00_to_15 = _mm_and_si128(cpt, mask);
+        __m128i vec_16_to_31 = _mm_and_si128(_mm_srli_epi16(cpt, 2), mask);
+        __m128i vec_32_to_47 = _mm_and_si128(_mm_srli_epi16(cpt, 4), mask);
+        __m128i vec_48_to_63 = _mm_and_si128(_mm_srli_epi16(cpt, 6), mask);
+
+        __m512 xx, yy;
+
+        xx = _mm512_loadu_ps(&query[i]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_00_to_15));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 16]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_16_to_31));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 32]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_32_to_47));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 48]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        o_compact += 16;
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    __fxu(query, y, D, 2, result);
+#endif
+    return result;
+}
+
+FORCE_INLINE float IP64_fxu7(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    uint8_t *o_compact = const_cast<uint8_t *>(y);
+
+    __m128i mask6 = _mm_set1_epi8(0b00111111);
+    __m128i mask2 = _mm_set1_epi8(0b00110000);
+    __m128i mask4 = _mm_set1_epi8(0b00001111);
+    __m128i top_mask = _mm_set1_epi8(0b1000000);
+
+    for (size_t i = 0; i < D; i += 64) {
+        __m128i cpt1 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_compact + 0));
+        __m128i cpt2 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_compact + 16));
+        __m128i cpt3 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_compact + 32));
+
+        __m128i vec_00_to_15 = _mm_and_si128(cpt1, mask6);
+        __m128i vec_16_to_31 = _mm_and_si128(cpt2, mask6);
+        __m128i vec_32_to_47 = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi16(cpt1, 2), mask2), _mm_and_si128(cpt3, mask4));
+        __m128i vec_48_to_63 = _mm_or_si128(
+            _mm_and_si128(_mm_srli_epi16(cpt2, 2), mask2),
+            _mm_and_si128(_mm_srli_epi16(cpt3, 4), mask4));
+        o_compact += 48;
+
+        int64_t top_bit = *reinterpret_cast<int64_t *>(o_compact);
+        o_compact += 8;
+
+        __m128i top_00_to_15 =
+            _mm_and_si128(_mm_set_epi64x(top_bit << 5, top_bit << 6), top_mask);
+        __m128i top_16_to_31 =
+            _mm_and_si128(_mm_set_epi64x(top_bit << 3, top_bit << 4), top_mask);
+        __m128i top_32_to_47 =
+            _mm_and_si128(_mm_set_epi64x(top_bit << 1, top_bit << 2), top_mask);
+        __m128i top_48_to_63 =
+            _mm_and_si128(_mm_set_epi64x(top_bit >> 1, top_bit << 0), top_mask);
+
+        vec_00_to_15 = _mm_or_si128(top_00_to_15, vec_00_to_15);
+        vec_16_to_31 = _mm_or_si128(top_16_to_31, vec_16_to_31);
+        vec_32_to_47 = _mm_or_si128(top_32_to_47, vec_32_to_47);
+        vec_48_to_63 = _mm_or_si128(top_48_to_63, vec_48_to_63);
+
+        __m512 xx, yy;
+
+        xx = _mm512_loadu_ps(&query[i]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_00_to_15));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 16]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_16_to_31));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 32]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_32_to_47));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 48]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else 
+    __fxu(query, y, D, 7, result);
+#endif
+    return result;
+}
+
+FORCE_INLINE float IP64_fxu3(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    uint8_t *o_compact = const_cast<uint8_t *>(y);
+
+    __m128i mask = _mm_set1_epi8(0b11);
+    __m128i top_mask = _mm_set1_epi8(0b100);
+
+    for (size_t i = 0; i < D; i += 64) {
+        __m128i cpt = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_compact));
+        o_compact += 16;
+
+        int64_t top_bit = *reinterpret_cast<int64_t *>(o_compact);
+        o_compact += 8;
+
+        __m128i vec_00_to_15 = _mm_and_si128(cpt, mask);
+        __m128i vec_16_to_31 = _mm_and_si128(_mm_srli_epi16(cpt, 2), mask);
+        __m128i vec_32_to_47 = _mm_and_si128(_mm_srli_epi16(cpt, 4), mask);
+        __m128i vec_48_to_63 = _mm_and_si128(_mm_srli_epi16(cpt, 6), mask);
+
+        __m128i top_00_to_15 =
+            _mm_and_si128(_mm_set_epi64x(top_bit << 1, top_bit << 2), top_mask);
+        __m128i top_16_to_31 =
+            _mm_and_si128(_mm_set_epi64x(top_bit >> 1, top_bit >> 0), top_mask);
+        __m128i top_32_to_47 =
+            _mm_and_si128(_mm_set_epi64x(top_bit >> 3, top_bit >> 2), top_mask);
+        __m128i top_48_to_63 =
+            _mm_and_si128(_mm_set_epi64x(top_bit >> 5, top_bit >> 4), top_mask);
+
+        vec_00_to_15 = _mm_or_si128(top_00_to_15, vec_00_to_15);
+        vec_16_to_31 = _mm_or_si128(top_16_to_31, vec_16_to_31);
+        vec_32_to_47 = _mm_or_si128(top_32_to_47, vec_32_to_47);
+        vec_48_to_63 = _mm_or_si128(top_48_to_63, vec_48_to_63);
+
+        __m512 xx, yy;
+
+        xx = _mm512_loadu_ps(&query[i]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_00_to_15));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 16]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_16_to_31));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 32]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_32_to_47));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+
+        xx = _mm512_loadu_ps(&query[i + 48]);
+        yy = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
+        sum = _mm512_fmadd_ps(
+            xx, yy, sum); // I heard that this may cause underclocking on some CPUs.
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    __fxu(query, y, D, 3, result);
+#endif
+
+    return result;
+}
+
+FORCE_INLINE float IP16_fxu1(const float *__restrict__ query, const uint8_t *__restrict__ mask, size_t len)
+{
+#if defined(__AVX512F__)
+    __m512 acc = _mm512_setzero_ps(); // Initialize the accumulator to 0
+
+    // Process 16 float elements per loop
+    for (size_t i = 0; i < len; i += 16) {
+        // Calculate the mask position corresponding to the current block
+        const auto m = mask + (i / 8);
+        __mmask16 k = _cvtu32_mask16(m[0] + ((uint32_t)m[1] << 8));
+
+        // Load data based on the mask (unselected positions are set to 0)
+        __m512 values = _mm512_maskz_load_ps(k, query + i);
+
+        // Accumulate to the accumulator
+        acc = _mm512_add_ps(acc, values);
+    }
+
+    // Sum all elements in the accumulator
+    return _mm512_reduce_add_ps(acc);
+#else
+    float ans = 0;
+    for (size_t i = 0; i < len; i += 8) {
+        auto m = mask[(i / 8)];
+        for (int j = 0; j < 8; ++j) {
+            if (m & (1 << j)) {
+                ans += x[i + j];
+            }
+        }
+    }
+    return ans;
+#endif
+}
+
+FORCE_INLINE float IP_fxi32(
+    const float *__restrict__ x, const int32_t *__restrict__ y, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    size_t num16 = L - (L & 0b1111);
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < num16; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        __m512 yy = _mm512_cvtepi32_ps(_mm512_loadu_epi32(&y[i]));
+        sum = _mm512_fmadd_ps(xx, yy, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+    for (size_t i = num16; i < L; ++i) {
+        result += x[i] * static_cast<float>(y[i]);
+    }
+#else
+    for (size_t i = 0; i < L; ++i) {
+        result += x[i] * static_cast<float>(y[i]);
+    }
+#endif
+    return result;
+}
+
+/**
+ * @brief Sum a vector whose length is a multiple of 16
+ *
+ * @param x float vec
+ * @param L length of vec
+ * @return float
+ */
+inline float sumvec16(const float *__restrict__ x, size_t L)
+{
+    float result = 0;
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 xx = _mm512_loadu_ps(&x[i]);
+        sum = _mm512_add_ps(xx, sum);
+    }
+    result = _mm512_reduce_add_ps(sum);
+#else
+    for (size_t i = 0; i < L; i += 4) {
+        result += x[i];
+        result += x[i + 1];
+        result += x[i + 2];
+        result += x[i + 3];
+    }
+#endif
+    return result;
+}
+
+inline float sumvec(const float *__restrict__ x, size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    float result = sumvec16(x, num16);
+    for (size_t i = num16; i < L; ++i) {
+        result += x[i];
+    }
+    return result;
+}
+
+// ==============================================================
+// popcount (a.k.a, bitcount)
+// ==============================================================
+inline size_t popcount(size_t B, const u_int64_t *__restrict__ d)
+{
+    size_t ret = 0;
+    for (size_t i = 0; i < B / 64; ++i) {
+        ret += __builtin_popcountll((*d));
+        ++d;
+    }
+    return ret;
+}
+
+/**
+ * @brief Get max abs sum of 4 dim segments of a vec
+ *
+ * @param qc Target vec
+ * @param D Dimension of vec
+ * @param vl Lower bound
+ * @param vr Upper bound
+ */
+inline void data_range1(const float *qc, size_t D, float &vl, float &vr)
+{
+    float max_abs = 0;
+#if defined(__AVX512F__)
+    float PORTABLE_ALIGN64 abs_qc[D];
+    for (size_t i = 0; i < D; i += 32) {
+        __m512 q1 = _mm512_loadu_ps(&qc[i]);
+        __m512 q2 = _mm512_loadu_ps(&qc[i + 16]);
+        q1 = _mm512_abs_ps(q1);
+        q2 = _mm512_abs_ps(q2);
+        _mm512_storeu_ps(&abs_qc[i], q1);
+        _mm512_storeu_ps(&abs_qc[i + 16], q2);
+    }
+    for (size_t i = 0; i < D; i += 4) {
+        float tmp = abs_qc[i] + abs_qc[i + 1] + abs_qc[i + 2] + abs_qc[i + 3];
+        max_abs = tmp > max_abs ? tmp : max_abs;
+    }
+#else
+    for (size_t i = 0; i < D; i += 4) {
+        float tmp = abs(qc[i]) + abs(qc[i + 1]) + abs(qc[i + 2]) + abs(qc[i + 3]);
+        max_abs = tmp > max_abs ? tmp : max_abs;
+    }
+#endif
+    vr = max_abs;
+    vl = -max_abs;
+}
+
+/**
+ * @brief get vl & vr for a vector, L must be a multiple of 16, align to 64 bytes
+ */
+inline void data_range16(const float *__restrict__ q, float &vl, float &vr, size_t L)
+{
+#if defined(__AVX512F__)
+    __m512 max_q = _mm512_setzero_ps();
+    __m512 min_q = _mm512_setzero_ps();
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 y = _mm512_load_ps(&q[i]);
+        max_q = _mm512_max_ps(y, max_q);
+        min_q = _mm512_min_ps(y, min_q);
+    }
+    vr = _mm512_reduce_max_ps(max_q);
+    vl = _mm512_reduce_min_ps(min_q);
+#else
+    vl = +1e20;
+    vr = -1e20;
+    for (size_t i = 0; i < L; ++i) {
+        float tmp = q[i];
+        vl = tmp < vl ? tmp : vl;
+        vr = tmp > vr ? tmp : vr;
+    }
+#endif
+}
+
+inline void data_range(const float *__restrict__ q, float &vl, float &vr, size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    data_range16(q, vl, vr, num16);
+    for (size_t i = num16; i < L; ++i) {
+        float tmp = q[i];
+        vl = tmp < vl ? tmp : vl;
+        vr = tmp > vr ? tmp : vr;
+    }
+}
+
+/*
+ * use scalar quantization to quantize a vec
+ */
+template <typename T, size_t Bits>
+inline void scalar_quantize16(
+    T *__restrict__ result, const float *__restrict__ vec, float vl, float width, size_t L)
+{
+    static_assert(sizeof(T) * 8 == Bits);
+    float one_over_width = 1.0 / width;
+#if defined(__AVX512F__)
+    __m512 o = _mm512_set1_ps(one_over_width);
+    __m512 v = _mm512_set1_ps(vl);
+    __m512 t = _mm512_set1_ps(0.5);
+    for (size_t i = 0; i < L; i += 16) {
+        __m512 q = _mm512_loadu_ps(&vec[i]);
+        q = _mm512_mul_ps(_mm512_sub_ps(q, v), o);
+        q = _mm512_add_ps(q, t);
+
+        __m512i c32 = _mm512_cvttps_epi32(q);
+        if (Bits == 32) {
+            _mm512_storeu_epi32(&result[i], c32);
+        } else if (Bits == 16) {
+            __m256i c16 = _mm512_cvtepi32_epi16(c32);
+            _mm256_storeu_epi32(&result[i], c16);
+        } else if (Bits == 8) {
+            __m128i c8 = _mm256_cvtepi16_epi8(_mm512_cvtepi32_epi16(c32));
+            _mm_storeu_epi32(&result[i], c8);
+        } else {
+            std::cerr << "Bad scalar quantization parameters\n";
+            abort();
+        }
+    }
+#else
+    for (size_t i = 0; i < L; i += 4) {
+        result[i] = static_cast<T>((vec[i] - vl) * one_over_width + 0.5);
+        result[i + 1] = static_cast<T>((vec[i + 1] - vl) * one_over_width + 0.5);
+        result[i + 2] = static_cast<T>((vec[i + 2] - vl) * one_over_width + 0.5);
+        result[i + 3] = static_cast<T>((vec[i + 3] - vl) * one_over_width + 0.5);
+    }
+#endif
+}
+
+template <typename T, size_t Bits>
+inline void scalar_quantize(
+    T *__restrict__ result, const float *__restrict__ vec, float vl, float width, size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    scalar_quantize16<T, Bits>(result, vec, vl, width, num16);
+
+    float one_over_width = 1.0 / width;
+    for (size_t i = num16; i < L; ++i) {
+        result[i] = static_cast<T>((vec[i] - vl) * one_over_width + 0.5);
+    }
+}
+
+void high_acc_quantize16(
+    int16_t *__restrict__ result, const float *__restrict__ q, float &width, size_t D)
+{
+    // quantize it into 14-bit SIGNED intger such that
+    // the sum of 4 does not cause overflow in int16
+    constexpr int BQ = 14;
+    // find the maximum absolute value in the vector q;
+    float vl, vr;
+    data_range16(q, vl, vr, D);
+    float vmax = std::max(std::abs(vl), std::abs(vr));
+
+    width = vmax / ((1 << (BQ - 1)) - 1);
+    for (size_t i = 0; i < D; i++) {
+        float tmp = q[i] / width;
+        result[i] = (int16_t)(tmp + 0.5 - (tmp < 0));
+    }
+}
+
+/* sub 2 vec and get summary of new vec, L % 16 = 0 */
+inline float minus_sum16(
+    const float *__restrict__ q,
+    const float *__restrict__ c,
+    float *__restrict__ qc,
+    size_t L)
+{
+#if defined(__AVX512F__)
+    const float *x = q;
+    const float *y = c;
+    float *z = qc;
+    auto sum = _mm512_setzero_ps();
+    for (size_t j = 0; j < L; j += 16) {
+        auto xx = _mm512_loadu_ps(x);
+        auto yy = _mm512_loadu_ps(y);
+        auto zz = _mm512_sub_ps(xx, yy);
+        sum = _mm512_add_ps(sum, zz);
+        _mm512_storeu_ps(z, zz);
+        x += 16;
+        y += 16;
+        z += 16;
+    }
+    return _mm512_reduce_add_ps(sum);
+#else
+    float sumqc = 0;
+    for (size_t i = 0; i < L; i += 4) {
+        qc[i] = q[i] - c[i];
+        qc[i + 1] = q[i + 1] - c[i + 1];
+        qc[i + 2] = q[i + 2] - c[i + 2];
+        qc[i + 3] = q[i + 3] - c[i + 3];
+        sumqc += qc[i] + qc[i + 1] + qc[i + 2] + qc[i + 3];
+    }
+    return sumqc;
+#endif
+}
+
+inline float normalize_query16(
+    float *unit_q,
+    const float *__restrict__ q,
+    const float *__restrict__ c,
+    float norm,
+    size_t D)
+{
+    constexpr float eps = 1e-5;
+
+    if (norm > eps) {
+        auto sum = _mm512_setzero_ps();
+        auto fac = _mm512_set1_ps(1.0 / norm);
+        for (size_t i = 0; i < D; i += 16) {
+            auto qq = _mm512_loadu_ps(q);
+            auto cc = _mm512_loadu_ps(c);
+            auto uu = _mm512_mul_ps(_mm512_sub_ps(qq, cc), fac);
+            sum = _mm512_add_ps(sum, uu);
+            _mm512_storeu_ps(unit_q, uu);
+
+            unit_q += 16;
+            q += 16;
+            c += 16;
+        }
+        return _mm512_reduce_add_ps(sum);
+    } else { // in case that q_r-c is a zero vector
+        float value = 1.0 / std::sqrt((float)D);
+        std::fill(unit_q, unit_q + D, value);
+        return D * value;
+    }
+}
+
+inline float minus_sum(
+    const float *__restrict__ q,
+    const float *__restrict__ c,
+    float *__restrict__ qc,
+    size_t L)
+{
+    size_t num16 = L - (L & 0b1111);
+    float sumqc = minus_sum16(q, c, qc, num16);
+
+    for (size_t i = num16; i < L; ++i) {
+        qc[i] = q[i] - c[i];
+        sumqc += qc[i];
+    }
+    return sumqc;
+}
+
+template <int bits, typename T>
+void DECOMPACTION_FORCE(const uint8_t *__restrict__ y, T *out, size_t D)
+{
+    if (bits == 0)
+        return;
+    uint8_t shift_v = 1;
+    size_t y_p = 0;
+    for (size_t d = 0; d < D; d++) {
+        out[d] = 0;
+        for (size_t i = 0; i < bits; i++) {
+            out[d] |= ((y[y_p + i] & shift_v) != 0) << i;
+        }
+        shift_v <<= 1;
+        if (shift_v == 0) {
+            shift_v = 1;
+            y_p += bits;
+        }
+    }
+    assert(y_p == D * bits / 8);
+}
+
+template <int bits>
+inline auto get_IP_FUNC() -> float (*)(const float *__restrict__, const uint8_t *__restrict__, size_t);
+
+template <int bits>
+float IP_FROCE(
+    const float *__restrict__ query, const uint8_t *__restrict__ y, size_t D)
+{
+    if constexpr (bits == 0)
+        return 0;
+    uint8_t rec[D];
+    DECOMPACTION_FORCE<bits>(y, rec, D);
+    return IP16_fxu8(query, rec, D);
+}
+
+// template <int bits>
+// inline auto get_IP_FUNC() -> float (*)(const float *__restrict__, const uint8_t *__restrict__, size_t)
+// {
+//     if (bits == 1) {
+//         return IP16_fxu1;
+//     } else if (bits == 2) {
+//         return IP64_fxu2;
+//     } else if (bits == 3) {
+//         return IP64_fxu3;
+//     } else if (bits == 4) {
+//         return IP32_fxu4;
+//     } else if (bits == 6) {
+//         return IP64_fxu6;
+//     } else if (bits == 7) {
+//         return IP64_fxu7;
+//     } else if (bits == 8) {
+//         return IP16_fxu8;
+//     }
+//     return IP_FROCE<bits>;
+// }
+
+// inline auto get_IP_FUNC(int bits) -> float (*)(const float *__restrict__, const uint8_t *__restrict__, size_t)
+// {
+//     switch (bits) {
+//     case 0:
+//         return get_IP_FUNC<0>();
+//     case 1:
+//         return get_IP_FUNC<1>();
+//     case 2:
+//         return get_IP_FUNC<2>();
+//     case 3:
+//         return get_IP_FUNC<3>();
+//     case 4:
+//         return get_IP_FUNC<4>();
+//     case 5:
+//         return get_IP_FUNC<5>();
+//     case 6:
+//         return get_IP_FUNC<6>();
+//     case 7:
+//         return get_IP_FUNC<7>();
+//     case 8:
+//         return get_IP_FUNC<8>();
+//     case 9:
+//         return get_IP_FUNC<9>();
+//     case 10:
+//         return get_IP_FUNC<10>();
+//     case 11:
+//         return get_IP_FUNC<11>();
+//     case 12:
+//         return get_IP_FUNC<12>();
+//     case 13:
+//         return get_IP_FUNC<13>();
+//     case 14:
+//         return get_IP_FUNC<14>();
+//     case 15:
+//         return get_IP_FUNC<15>();
+//     case 16:
+//         return get_IP_FUNC<16>();
+//     default:
+//         assert(false);
+//     }
+//     return nullptr;
+// }
+
+// void store_compacted_code(uint8_t *o_compact, uint16_t *o_raw16, size_t num_dim, size_t bits)
+// {
+//     uint8_t o_raw8[num_dim];
+//     if (bits > 8) {
+//         for (size_t i = 0; i < num_dim; i++) {
+//             o_compact[i] = o_raw16[i] & 0xFF;
+//         }
+//         o_compact += num_dim;
+//         bits -= 8;
+//         for (size_t i = 0; i < num_dim; i++) {
+//             o_raw8[i] = o_raw16[i] >> 8;
+//         }
+//     } else {
+//         std::copy(o_raw16, o_raw16 + num_dim, o_raw8);
+//     }
+//     auto o_raw = o_raw8;
+
+//     if (bits == 8) {
+//         std::memcpy(o_compact, o_raw8, sizeof(uint8_t) * num_dim);
+//     } else if (bits == 1) {
+//         for (size_t i = 0; i < num_dim; i += 8) {
+//             o_compact[i / 8] = 0;
+//             for (size_t j = 0; j < 8; j++) {
+//                 if (o_raw8[i + j])
+//                     o_compact[i / 8] |= (1 << j);
+//             }
+//         }
+//     } else if (bits == 4) {
+//         for (size_t j = 0; j < num_dim; j += 32) {
+//             __m128i vec_00_to_15 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw));
+//             __m128i vec_16_to_31 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 16));
+//             vec_16_to_31 = _mm_slli_epi16(vec_16_to_31, 4);
+
+//             __m128i compact = _mm_or_si128(vec_00_to_15, vec_16_to_31);
+
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact), compact);
+
+//             o_raw += 32;
+//             o_compact += 16;
+//         }
+//     } else if (bits == 6) {
+//         __m128i mask2 = _mm_set1_epi8(0b11000000);
+//         __m128i mask4 = _mm_set1_epi8(0b00001111);
+//         for (size_t d = 0; d < num_dim; d += 64) {
+//             __m128i vec_00_to_15 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw));
+//             __m128i vec_16_to_31 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 16));
+//             __m128i vec_32_to_47 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 32));
+//             __m128i vec_48_to_63 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 48));
+
+//             __m128i compact = _mm_or_si128(
+//                 vec_00_to_15, _mm_and_si128(_mm_slli_epi16(vec_32_to_47, 2), mask2));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 0), compact);
+
+//             compact = _mm_or_si128(
+//                 vec_16_to_31, _mm_and_si128(_mm_slli_epi16(vec_48_to_63, 2), mask2));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 16), compact);
+
+//             compact = _mm_or_si128(
+//                 _mm_and_si128(vec_32_to_47, mask4),
+//                 _mm_slli_epi16(_mm_and_si128(vec_48_to_63, mask4), 4));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 32), compact);
+
+//             o_raw += 64;
+//             o_compact += 48;
+//         }
+//     } else if (bits == 2) {
+//         // Create a mask to isolate the two least significant bits of each byte
+//         __m128i mask = _mm_set1_epi8(0b00000011);
+
+//         // Process the data in chunks of 64 bytes
+//         for (size_t d = 0; d < num_dim; d += 64) {
+//             // Load 64 bytes of raw data into four 128-bit vectors
+//             __m128i vec_00_to_15 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw));
+//             __m128i vec_16_to_31 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 16));
+//             __m128i vec_32_to_47 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 32));
+//             __m128i vec_48_to_63 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 48));
+
+//             // Apply the mask to extract the two least significant bits from each vector
+//             vec_00_to_15 = _mm_and_si128(vec_00_to_15, mask);
+//             vec_16_to_31 = _mm_slli_epi16(_mm_and_si128(vec_16_to_31, mask), 2); // Shift left by 2 bits
+//             vec_32_to_47 = _mm_slli_epi16(_mm_and_si128(vec_32_to_47, mask), 4); // Shift left by 4 bits
+//             vec_48_to_63 = _mm_slli_epi16(_mm_and_si128(vec_48_to_63, mask), 6); // Shift left by 6 bits
+
+//             // Combine the processed vectors into a single compact representation
+//             __m128i compact = _mm_or_si128(
+//                 _mm_or_si128(vec_00_to_15, vec_16_to_31),
+//                 _mm_or_si128(vec_32_to_47, vec_48_to_63));
+
+//             // Store the compacted data into the output buffer
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact), compact);
+
+//             // Move to the next chunk of raw data and output buffer
+//             o_raw += 64;
+//             o_compact += 16;
+//         }
+//     } else if (bits == 3) {
+//         // Create a mask to isolate the two least significant bits of each byte
+//         __m128i mask = _mm_set1_epi8(0b11);
+//         for (size_t d = 0; d < num_dim; d += 64) {
+//             // Load 64 bytes of raw data into four 128-bit vectors
+//             __m128i vec_00_to_15 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw));
+//             __m128i vec_16_to_31 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 16));
+//             __m128i vec_32_to_47 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 32));
+//             __m128i vec_48_to_63 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 48));
+
+//             // Apply the mask to extract the two least significant bits from each vector
+//             vec_00_to_15 = _mm_and_si128(vec_00_to_15, mask);
+//             vec_16_to_31 = _mm_slli_epi16(_mm_and_si128(vec_16_to_31, mask), 2);
+//             vec_32_to_47 = _mm_slli_epi16(_mm_and_si128(vec_32_to_47, mask), 4);
+//             vec_48_to_63 = _mm_slli_epi16(_mm_and_si128(vec_48_to_63, mask), 6);
+
+//             // Combine the processed vectors into a single compact representation
+//             __m128i compact = _mm_or_si128(
+//                 _mm_or_si128(vec_00_to_15, vec_16_to_31),
+//                 _mm_or_si128(vec_32_to_47, vec_48_to_63));
+
+//             // Store the compacted data into the output buffer
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact), compact);
+//             o_compact += 16;
+
+//             // Initialize top_bit to store the top bits of the raw data
+//             int64_t top_bit = 0;
+//             int64_t top_mask = 0x0101010101010101;
+//             // Extract the top bits from the raw data
+//             for (size_t i = 0; i < 64; i += 8) {
+//                 int64_t cur_codes = *reinterpret_cast<int64_t *>(o_raw + i);
+//                 top_bit |= ((cur_codes >> 2) & top_mask) << (i / 8);
+//             }
+//             // Copy the top bits to the output buffer
+//             std::memcpy(o_compact, &top_bit, sizeof(int64_t));
+
+//             o_raw += 64;
+//             o_compact += 8;
+//         }
+//     } else if (bits == 7) {
+//         __m128i mask2 = _mm_set1_epi8(0b11000000);
+//         __m128i mask4 = _mm_set1_epi8(0b00001111);
+//         __m128i mask6 = _mm_set1_epi8(0b00111111);
+//         for (size_t d = 0; d < num_dim; d += 64) {
+//             __m128i vec_00_to_15 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw));
+//             __m128i vec_16_to_31 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 16));
+//             __m128i vec_32_to_47 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 32));
+//             __m128i vec_48_to_63 = _mm_loadu_si128(reinterpret_cast<__m128i *>(o_raw + 48));
+
+//             __m128i compact = _mm_or_si128(
+//                 _mm_and_si128(vec_00_to_15, mask6),
+//                 _mm_and_si128(_mm_slli_epi16(vec_32_to_47, 2), mask2));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 0), compact);
+
+//             compact = _mm_or_si128(
+//                 _mm_and_si128(vec_16_to_31, mask6),
+//                 _mm_and_si128(_mm_slli_epi16(vec_48_to_63, 2), mask2));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 16), compact);
+
+//             compact = _mm_or_si128(
+//                 _mm_and_si128(vec_32_to_47, mask4),
+//                 _mm_slli_epi16(_mm_and_si128(vec_48_to_63, mask4), 4));
+//             _mm_storeu_si128(reinterpret_cast<__m128i *>(o_compact + 32), compact);
+//             o_compact += 48;
+
+//             int64_t top_bit = 0;
+//             int64_t top_mask = 0x0101010101010101;
+//             for (size_t i = 0; i < 64; i += 8) {
+//                 int64_t cur_codes = *reinterpret_cast<int64_t *>(o_raw + i);
+//                 top_bit |= ((cur_codes >> 6) & top_mask) << (i / 8);
+//             }
+//             std::memcpy(o_compact, &top_bit, sizeof(int64_t));
+
+//             o_compact += 8;
+//             o_raw += 64;
+//         }
+//     } else if (bits > 0) {
+//         for (size_t i = 0; i < num_dim * bits / 8; i++) {
+//             o_compact[i] = 0;
+//         }
+//         size_t shift = 0;
+//         for (size_t d = 0; d < num_dim; d += 1) {
+//             auto t = o_raw8[d];
+//             for (size_t i = 0; i < bits; i++, t >>= 1) {
+//                 o_compact[i] |= (t & 1) << shift;
+//             }
+//             ++shift;
+//             if (shift == 8) {
+//                 shift = 0;
+//                 o_compact += bits;
+//             }
+//         }
+//         assert(shift == 0);
+//     }
+// }
